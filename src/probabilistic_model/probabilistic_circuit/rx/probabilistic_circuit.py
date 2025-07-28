@@ -622,6 +622,13 @@ class SumUnit(InnerUnit):
             likelihood = subcircuit.log_likelihood(samples)
             result[likelihood > -np.inf] = index
         return result
+    
+    def remove_child(self, child_to_remove: Unit):
+        """
+        Removes a child from this sum unit.
+        """
+        if child_to_remove in self.subcircuits:
+            self.probabilistic_circuit.remove_edge(self, child_to_remove)
 
 
 class ProductUnit(InnerUnit):
@@ -1411,6 +1418,54 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
 
     def __repr__(self):
         return f"{self.__class__.__name__} with {len(self.nodes())} nodes and {len(self.edges())} edges"
+    
+    def _forward_pass_likelihoods(self, x: np.ndarray) -> Dict["Unit", float]:
+        """
+        Performs a forward pass, computing the likelihood at each node for a given sample x.
+        Forward pass goes bottom-up: LEAVES -> INTERMEDIATE NODES -> ROOT
+        """
+        node_likelihoods = {}
+        variable_to_index_map = self.variable_to_index_map
+        
+        # Process nodes layer by layer from leaves to root
+        for layer in reversed(self.layers):
+            for node in layer:
+                
+                if node.is_leaf:
+                    # Step 1: Start at leaves, evaluate input distributions
+                    node.log_likelihood(x[:, [variable_to_index_map[variable] for variable in node.variables]])
+                    likelihood = np.exp(node.result_of_current_query)
+                    
+                elif isinstance(node, ProductUnit):
+                    # Step 2: Product units, multiply child probabilities
+                    likelihood = 1.0
+                    for child in node.subcircuits:
+                        likelihood *= node_likelihoods[child]
+                        
+                elif isinstance(node, SumUnit):
+                    # Step 3: Sum units, weighted sum of child probabilities  
+                    likelihood = 0.0
+                    for log_weight, child in node.log_weighted_subcircuits:
+                        weight = np.exp(log_weight)
+                        likelihood += weight * node_likelihoods[child]
+                        
+                else:
+                    raise NotImplementedError(f"Unknown node type: {type(node)}")
+                
+                node_likelihoods[node] = likelihood
+        
+        return node_likelihoods
+
+    def prune(self, percentage: float = 0.1):
+        """
+        Prune the circuit by removing the nodes with the lowest log_weights.
+        :param percentage: The percentage of nodes to remove.
+        """
+        if not 0 < percentage < 1:
+            raise ValueError("Percentage must be between 0 and 1.")
+
+        #TODO: Implement pruning
+        raise NotImplementedError("Pruning is not implemented yet.")
 
 class ShallowProbabilisticCircuit(ProbabilisticCircuit):
     """
