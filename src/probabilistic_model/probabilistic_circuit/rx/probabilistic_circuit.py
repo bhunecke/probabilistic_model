@@ -1427,23 +1427,24 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
         node_likelihoods = {}
         variable_to_index_map = self.variable_to_index_map
         
-        # Process nodes layer by layer from leaves to root
+        # Ensure x is 2D (reshape single sample to batch of size 1)
+        if x.ndim == 1:
+            x = x.reshape(1, -1)
+        
+        # Process nodes layer by layer
         for layer in reversed(self.layers):
             for node in layer:
                 
                 if node.is_leaf:
-                    # Step 1: Start at leaves, evaluate input distributions
                     node.log_likelihood(x[:, [variable_to_index_map[variable] for variable in node.variables]])
-                    likelihood = np.exp(node.result_of_current_query)
+                    likelihood = np.exp(node.result_of_current_query[0] if isinstance(node.result_of_current_query, np.ndarray) else node.result_of_current_query)
                     
                 elif isinstance(node, ProductUnit):
-                    # Step 2: Product units, multiply child probabilities
                     likelihood = 1.0
                     for child in node.subcircuits:
                         likelihood *= node_likelihoods[child]
                         
-                elif isinstance(node, SumUnit):
-                    # Step 3: Sum units, weighted sum of child probabilities  
+                elif isinstance(node, SumUnit): 
                     likelihood = 0.0
                     for log_weight, child in node.log_weighted_subcircuits:
                         weight = np.exp(log_weight)
@@ -1456,16 +1457,138 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
         
         return node_likelihoods
 
-    def prune(self, percentage: float = 0.1):
+    def _backward_pass_flows(self, node_likelihoods: Dict["Unit", float]) -> Dict[Tuple["Unit", "Unit"], float]:
         """
-        Prune the circuit by removing the nodes with the lowest log_weights.
-        :param percentage: The percentage of nodes to remove.
+        Computes the flows for each edge in the circuit for a single sample.
+        Backward pass goes top-down: ROOT -> INTERMEDIATE NODES -> LEAVES
         """
-        if not 0 < percentage < 1:
-            raise ValueError("Percentage must be between 0 and 1.")
+        node_flows = {self.root: 1.0}
+        edge_flows = {}
 
-        #TODO: Implement pruning
-        raise NotImplementedError("Pruning is not implemented yet.")
+        # Process nodes layer by layer
+        for layer in self.layers:
+            for n in layer:
+                if n not in node_flows:
+                    continue
+
+                if isinstance(n, SumUnit):
+                    p_n = node_likelihoods.get(n, 0.0)
+                    # TODO: Avoid division by zero, recheck?
+                    if p_n > 1e-9:
+                        for log_weight, child in n.log_weighted_subcircuits:
+                            weight = np.exp(log_weight)
+                            child_likelihood = node_likelihoods.get(child, 0.0)
+                            edge_flow = (weight * child_likelihood / p_n) * node_flows[n]
+                            edge_flows[(n, child)] = edge_flow
+                            node_flows[child] = node_flows.get(child, 0.0) + edge_flow
+            
+                elif isinstance(n, ProductUnit):
+                    for child in n.subcircuits:
+                        edge_flows[(n, child)] = node_flows[n]
+                        node_flows[child] = node_flows.get(child, 0.0) + node_flows[n]
+                    
+        return edge_flows
+    
+    def compute_edge_flows(self, x: np.ndarray) -> Dict[Tuple["Unit", "Unit"], float]:
+        """
+        Compute edge flows for a given sample.
+        Forward pass to get node likelihoods and backward pass to get edge flows.
+        """
+        node_likelihoods = self._forward_pass_likelihoods(x)
+        edge_flows = self._backward_pass_flows(node_likelihoods)
+        return edge_flows
+
+    def prune(self, dataset: np.ndarray, pruning_percentage: float = 0.1):
+        """
+        Prunes the circuit using EFLOW heuristic.
+
+        :param dataset: The dataset to use for calculating circuit flows.
+        :param pruning_percentage: The percentage of sum-unit edges to prune (e.g., 0.8 for 80%).
+        """
+        if not 0 < pruning_percentage < 1:
+            raise ValueError("Pruning percentage must be between 0 and 1.")
+
+        # Aggregate edge flows over the entire dataset
+        aggregate_flows = {}
+
+        print("Calculating aggregate flows for pruning...")
+        for x in dataset:
+            edge_flows = self.compute_edge_flows(x)
+            
+            for edge, flow in edge_flows.items():
+                aggregate_flows[edge] = aggregate_flows.get(edge, 0.0) + flow
+        
+        prunable_edges = sorted(
+            [edge for edge in aggregate_flows.keys() if isinstance(edge[0], SumUnit)],
+            key=lambda edge: aggregate_flows[edge]
+        )
+        
+        num_to_prune = int(len(prunable_edges) * pruning_percentage)
+        edges_to_prune = prunable_edges[:num_to_prune]
+
+        # Pruning
+        print(f"Pruning {len(edges_to_prune)} of {len(prunable_edges)} sum edges...")
+        modified_sum_nodes = set()
+        for parent_node, child_node in edges_to_prune:
+            parent_node.remove_child(child_node)
+            modified_sum_nodes.add(parent_node)
+
+        # Remove disconnected nodes, sum units without children
+        nodes_to_remove = set()
+        
+        for sum_node in modified_sum_nodes:
+            if len(sum_node.subcircuits) == 0:
+                nodes_to_remove.add(sum_node)
+        
+        if len(self.nodes()) > 0:
+            try:
+                current_root = self.root
+                reachable_nodes = self.descendants(current_root)
+                reachable_nodes.add(current_root)
+                
+                for node in list(self.nodes()):
+                    if node not in reachable_nodes:
+                        nodes_to_remove.add(node)
+                        
+            except ValueError:
+                # There are disconnected nodes
+                all_nodes = set(self.nodes())
+                visited = set()
+                largest_component = set()
+                
+                for node in all_nodes:
+                    if node not in visited:
+                        component = {node}
+                        descendants = self.descendants(node)
+                        component.update(descendants)
+                        
+                        queue = [node]
+                        while queue:
+                            current = queue.pop(0)
+                            for pred in self.predecessors(current):
+                                if pred not in component:
+                                    component.add(pred)
+                                    queue.append(pred)
+                        
+                        visited.update(component)
+                        
+                        if len(component) > len(largest_component):
+                            largest_component = component
+                
+                for node in all_nodes:
+                    if node not in largest_component:
+                        nodes_to_remove.add(node)
+
+        for node in nodes_to_remove:
+            if node in self.nodes():
+                self.remove_node(node)
+
+        # Normalize weights again of remaining sum nodes
+        for sum_node in modified_sum_nodes:
+            if sum_node in self.nodes() and len(sum_node.subcircuits) > 0:
+                sum_node.normalize()
+
+        print("Pruning complete.")
 
 class ShallowProbabilisticCircuit(ProbabilisticCircuit):
     """
