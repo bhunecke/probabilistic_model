@@ -1628,17 +1628,62 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
             # Old parent to new child (green in Fig. 7)
             original_sum_unit.add_child(new_child, original_weight * epsilon2)
 
-            # New parent to old child (purple in Fig 7)
+            # New parent to old child (purple in Fig. 7)
             new_sum_unit.add_child(original_child, original_weight * epsilon3)
 
         original_sum_unit.normalize()
         new_sum_unit.normalize()
     
-    def grow(self):
+    def grow(self, noise_variance: float = 0.1):
         """
-        Grow the circuit by adding new nodes and edges.
+        Grows the circuit by creating a noisy copy of its components.
+
+        :noise_variance: The variance of the Gaussian noise applied to new weights.
         """
-        raise NotImplementedError("The grow method is not implemented yet")
+        print("Starting circuit growth...")
+
+        # Store the original root before we start modifying the circuit
+        original_root = self.root
+
+        # Create a deep copy of the entire circuit to serve as the "new" circuit
+        new_circuit = self.__deepcopy__()
+        
+        # Create a mapping from original units to their copied equivalents
+        unit_map = {}
+        original_nodes = list(self.nodes())
+        new_nodes = list(new_circuit.nodes())
+        
+        # Map nodes based on their position (since deepcopy preserves structure)
+        for orig_node, new_node in zip(original_nodes, new_nodes):
+            unit_map[orig_node] = new_node
+
+        # Transfer copied nodes to this circuit by removing them from the new circuit first
+        for layer in reversed(self.layers):
+            for original_unit in layer:
+                new_unit = unit_map[original_unit]
+                
+                # Remove the new unit from its current circuit
+                if new_unit.probabilistic_circuit is not None:
+                    new_unit.probabilistic_circuit.remove_node(new_unit)
+                
+                # Add it to this circuit
+                self.add_node(new_unit)
+
+                if isinstance(original_unit, ProductUnit):
+                    # For product units, connect new parent to new children
+                    for original_child in original_unit.subcircuits:
+                        new_child = unit_map[original_child]
+                        new_unit.add_subcircuit(new_child)
+
+                elif isinstance(original_unit, SumUnit):
+                    self._grow_sum_unit(original_unit, new_unit, unit_map, noise_variance)
+
+        # The new root of the grown circuit is a Product unit combining the old and new roots
+        new_root = ProductUnit(probabilistic_circuit=self)
+        new_root.add_subcircuit(original_root)
+        new_root.add_subcircuit(unit_map[original_root])
+
+        print(f"Circuit growth complete. The new root is a ProductUnit.")
 
 class ShallowProbabilisticCircuit(ProbabilisticCircuit):
     """

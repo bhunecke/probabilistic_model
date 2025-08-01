@@ -1,7 +1,6 @@
 import numpy as np
-from probabilistic_model.probabilistic_circuit.rx.probabilistic_circuit import (
-    ProbabilisticCircuit, SumUnit, ProductUnit, leaf
-)
+import matplotlib.pyplot as plt
+from probabilistic_model.probabilistic_circuit.rx.probabilistic_circuit import ProbabilisticCircuit, SumUnit, ProductUnit, leaf
 from probabilistic_model.distributions.gaussian import GaussianDistribution
 from random_events.variable import Continuous
 
@@ -44,7 +43,6 @@ def main():
     circuit = create_simple_circuit()
 
     # Plot and save the circuit structure
-    import matplotlib.pyplot as plt
     circuit.plot_structure()
     plt.savefig("circuit_structure.png", dpi=300, bbox_inches='tight')
     plt.close()
@@ -91,7 +89,6 @@ def main():
         print(f"Edges removed: {original_edges - new_edges}")
         
         # Plot and save the pruned circuit structure
-        import matplotlib.pyplot as plt
         circuit.plot_structure()
         plt.savefig("circuit_structure_pruned.png", dpi=300, bbox_inches='tight')
         plt.close()
