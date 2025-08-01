@@ -1601,6 +1601,38 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
                 sum_node.normalize()
 
         print("Pruning complete.")
+
+    def _grow_sum_unit(self, original_sum_unit, new_sum_unit, unit_map, noise_variance):
+        """
+        Helper method to apply the growing operation to a single sum unit.
+        """
+        original_weighted_subcircuits = list(original_sum_unit.log_weighted_subcircuits)
+
+        # TODO: Clear children of the new unit by removing any existing edges
+        # for child in list(new_sum_unit.subcircuits):
+        #     new_sum_unit.probabilistic_circuit.remove_edge(new_sum_unit, child)
+
+        for log_weight, original_child in original_weighted_subcircuits:
+            original_weight = np.exp(log_weight)
+            new_child = unit_map[original_child]
+
+            # Create noisy versions of the weights (see paper, gaussian noise variance: epsilon ~ N(1, sigma^2))
+            epsilon1 = abs(np.random.normal(1.0, noise_variance))
+            epsilon2 = abs(np.random.normal(1.0, noise_variance))
+            epsilon3 = abs(np.random.normal(1.0, noise_variance))
+
+            # Create the three new edges described in the paper:
+            # New parent to new child (orange in Fig. 7)
+            new_sum_unit.add_child(new_child, original_weight * epsilon1)
+
+            # Old parent to new child (green in Fig. 7)
+            original_sum_unit.add_child(new_child, original_weight * epsilon2)
+
+            # New parent to old child (purple in Fig 7)
+            new_sum_unit.add_child(original_child, original_weight * epsilon3)
+
+        original_sum_unit.normalize()
+        new_sum_unit.normalize()
     
     def grow(self):
         """
