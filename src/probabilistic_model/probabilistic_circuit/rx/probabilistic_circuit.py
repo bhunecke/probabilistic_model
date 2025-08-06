@@ -1591,13 +1591,18 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
                     if node not in largest_component:
                         nodes_to_remove.add(node)
 
+        # Get current node indices for efficient membership testing
+        current_node_indices = {node.index for node in self.nodes() if node.index is not None}
+        
         for node in nodes_to_remove:
-            if node in self.nodes():
+            if node.index is not None and node.index in current_node_indices:
                 self.remove_node(node)
 
         # Normalize weights again of remaining sum nodes
+        # Refresh the set after removing nodes
+        current_node_indices = {node.index for node in self.nodes() if node.index is not None}
         for sum_node in modified_sum_nodes:
-            if sum_node in self.nodes() and len(sum_node.subcircuits) > 0:
+            if sum_node.index is not None and sum_node.index in current_node_indices and len(sum_node.subcircuits) > 0:
                 sum_node.normalize()
 
         print("Pruning complete.")
