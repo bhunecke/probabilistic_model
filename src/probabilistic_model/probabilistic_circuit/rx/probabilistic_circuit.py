@@ -639,8 +639,11 @@ class SumUnit(InnerUnit):
 
         :param child_to_remove: The child unit to remove.
         """
-        if child_to_remove in self.subcircuits:
-            self.probabilistic_circuit.remove_edge(self, child_to_remove)
+        # Use object identity instead of equality to avoid numpy array comparison issues
+        for child in self.subcircuits:
+            if child is child_to_remove:
+                self.probabilistic_circuit.remove_edge(self, child_to_remove)
+                break
 
 
 class ProductUnit(InnerUnit):
@@ -1435,8 +1438,9 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
         """
         Performs a forward pass, computing the likelihood at each node for a given sample x.
         Forward pass goes bottom-up: LEAVES -> INTERMEDIATE NODES -> ROOT
+        This method works in log space to prevent numerical underflow.
         """
-        node_likelihoods = {}
+        node_log_likelihoods = {}
         variable_to_index_map = self.variable_to_index_map
         
         # Ensure x is 2D (reshape single sample to batch of size 1)
@@ -1449,24 +1453,27 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
                 
                 if node.is_leaf:
                     node.log_likelihood(x[:, [variable_to_index_map[variable] for variable in node.variables]])
-                    likelihood = np.exp(node.result_of_current_query[0] if isinstance(node.result_of_current_query, np.ndarray) else node.result_of_current_query)
+                    log_likelihood = node.result_of_current_query[0] if isinstance(node.result_of_current_query, np.ndarray) else node.result_of_current_query
                     
                 elif isinstance(node, ProductUnit):
-                    likelihood = 1.0
+                    log_likelihood = 0.0
                     for child in node.subcircuits:
-                        likelihood *= node_likelihoods[child]
+                        log_likelihood += node_log_likelihoods[child]
                         
                 elif isinstance(node, SumUnit): 
-                    likelihood = 0.0
+                    # Use logsumexp for numerical stability
+                    log_weighted_children = []
                     for log_weight, child in node.log_weighted_subcircuits:
-                        weight = np.exp(log_weight)
-                        likelihood += weight * node_likelihoods[child]
+                        log_weighted_children.append(log_weight + node_log_likelihoods[child])
+                    log_likelihood = logsumexp(log_weighted_children)
                         
                 else:
                     raise NotImplementedError(f"Unknown node type: {type(node)}")
                 
-                node_likelihoods[node] = likelihood
+                node_log_likelihoods[node] = log_likelihood
         
+        # Convert to linear space only at the end for the return value
+        node_likelihoods = {node: np.exp(log_lik) for node, log_lik in node_log_likelihoods.items()}
         return node_likelihoods
 
     def _backward_pass_flows(self, node_likelihoods: Dict["Unit", float]) -> Dict[Tuple["Unit", "Unit"], float]:
@@ -1485,14 +1492,20 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
 
                 if isinstance(n, SumUnit):
                     p_n = node_likelihoods.get(n, 0.0)
-                    # TODO: Avoid division by zero, recheck?
-                    if p_n > 1e-9:
+                    # Use a much smaller threshold for high-dimensional problems
+                    # and handle the case where p_n is extremely small but non-zero
+                    if p_n > 0 and not np.isnan(p_n) and not np.isinf(p_n):
                         for log_weight, child in n.log_weighted_subcircuits:
                             weight = np.exp(log_weight)
                             child_likelihood = node_likelihoods.get(child, 0.0)
-                            edge_flow = (weight * child_likelihood / p_n) * node_flows[n]
-                            edge_flows[(n, child)] = edge_flow
-                            node_flows[child] = node_flows.get(child, 0.0) + edge_flow
+                            
+                            # Compute edge flow, handling potential numerical issues
+                            if child_likelihood > 0:
+                                edge_flow = (weight * child_likelihood / p_n) * node_flows[n]
+                                # Additional check for numerical validity
+                                if not np.isnan(edge_flow) and not np.isinf(edge_flow):
+                                    edge_flows[(n, child)] = edge_flow
+                                    node_flows[child] = node_flows.get(child, 0.0) + edge_flow
             
                 elif isinstance(n, ProductUnit):
                     for child in n.subcircuits:
@@ -1650,6 +1663,11 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
         # Store the original root before we start modifying the circuit
         original_root = self.root
 
+        # Only grow if the root is a SumUnit, otherwise the structure is not suitable for growing
+        if not isinstance(original_root, SumUnit):
+            print("Warning: Root is not a SumUnit. Cannot grow circuit effectively.")
+            return
+
         # Create a deep copy of the entire circuit to serve as the "new" circuit
         new_circuit = self.__deepcopy__()
         
@@ -1683,12 +1701,19 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
                 elif isinstance(original_unit, SumUnit):
                     self._grow_sum_unit(original_unit, new_unit, unit_map, noise_variance)
 
-        # The new root of the grown circuit is a Product unit combining the old and new roots
-        new_root = ProductUnit(probabilistic_circuit=self)
-        new_root.add_subcircuit(original_root)
-        new_root.add_subcircuit(unit_map[original_root])
+        # Instead of creating a ProductUnit root, add the copied root as a new component
+        # to the original root (which is already a SumUnit)
+        new_root_copy = unit_map[original_root]
+        
+        # Add the copied circuit as a new mixture component with a small log weight
+        # This maintains the SumUnit as root while growing the circuit
+        initial_log_weight = np.log(1.0 / (len(original_root.subcircuits) + 1))
+        original_root.add_subcircuit(new_root_copy, initial_log_weight)
+        
+        # Renormalize the original root to maintain proper mixture weights
+        original_root.normalize()
 
-        print(f"Circuit growth complete. The new root is a ProductUnit.")
+        print(f"Circuit growth complete. Root remains a SumUnit with {len(original_root.subcircuits)} components.")
 
 class ShallowProbabilisticCircuit(ProbabilisticCircuit):
     """
