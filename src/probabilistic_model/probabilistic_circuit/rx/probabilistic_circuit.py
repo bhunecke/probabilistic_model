@@ -9,6 +9,7 @@ from abc import abstractmethod, ABC
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import IntEnum
+from collections import defaultdict
 
 import rustworkx as rx
 import numpy as np
@@ -1433,192 +1434,99 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
 
     def __repr__(self):
         return f"{self.__class__.__name__} with {len(self.nodes())} nodes and {len(self.edges())} edges"
-    
-    def _forward_pass_likelihoods(self, x: np.ndarray) -> Dict["Unit", float]:
-        """
-        Performs a forward pass, computing the likelihood at each node for a given sample x.
-        Forward pass goes bottom-up: LEAVES -> INTERMEDIATE NODES -> ROOT
-        This method works in log space to prevent numerical underflow.
-        """
-        node_log_likelihoods = {}
-        variable_to_index_map = self.variable_to_index_map
-        
-        # Ensure x is 2D (reshape single sample to batch of size 1)
-        if x.ndim == 1:
-            x = x.reshape(1, -1)
-        
-        # Process nodes layer by layer
-        for layer in reversed(self.layers):
-            for node in layer:
-                
-                if node.is_leaf:
-                    node.log_likelihood(x[:, [variable_to_index_map[variable] for variable in node.variables]])
-                    log_likelihood = node.result_of_current_query[0] if isinstance(node.result_of_current_query, np.ndarray) else node.result_of_current_query
-                    
-                elif isinstance(node, ProductUnit):
-                    log_likelihood = 0.0
-                    for child in node.subcircuits:
-                        log_likelihood += node_log_likelihoods[child]
-                        
-                elif isinstance(node, SumUnit): 
-                    # Use logsumexp for numerical stability
-                    log_weighted_children = []
-                    for log_weight, child in node.log_weighted_subcircuits:
-                        log_weighted_children.append(log_weight + node_log_likelihoods[child])
-                    log_likelihood = logsumexp(log_weighted_children)
-                        
-                else:
-                    raise NotImplementedError(f"Unknown node type: {type(node)}")
-                
-                node_log_likelihoods[node] = log_likelihood
-        
-        # Convert to linear space only at the end for the return value
-        node_likelihoods = {node: np.exp(log_lik) for node, log_lik in node_log_likelihoods.items()}
-        return node_likelihoods
 
-    def _backward_pass_flows(self, node_likelihoods: Dict["Unit", float]) -> Dict[Tuple["Unit", "Unit"], float]:
+    def compute_circuit_flows(self, dataset: np.ndarray) -> Dict[Tuple[Unit, Unit], float]:
         """
-        Computes the flows for each edge in the circuit for a single sample.
-        Backward pass goes top-down: ROOT -> INTERMEDIATE NODES -> LEAVES
+        Compute the flow of information through the circuit for a given dataset.
+
+        :param dataset: The input dataset.
         """
-        node_flows = {self.root: 1.0}
-        edge_flows = {}
+        edge_flows = defaultdict(float)
 
-        # Process nodes layer by layer
-        for layer in self.layers:
-            for n in layer:
-                if n not in node_flows:
-                    continue
-
-                if isinstance(n, SumUnit):
-                    p_n = node_likelihoods.get(n, 0.0)
-                    # Use a much smaller threshold for high-dimensional problems
-                    # and handle the case where p_n is extremely small but non-zero
-                    if p_n > 0 and not np.isnan(p_n) and not np.isinf(p_n):
-                        for log_weight, child in n.log_weighted_subcircuits:
-                            weight = np.exp(log_weight)
-                            child_likelihood = node_likelihoods.get(child, 0.0)
-                            
-                            # Compute edge flow, handling potential numerical issues
-                            if child_likelihood > 0:
-                                edge_flow = (weight * child_likelihood / p_n) * node_flows[n]
-                                # Additional check for numerical validity
-                                if not np.isnan(edge_flow) and not np.isinf(edge_flow):
-                                    edge_flows[(n, child)] = edge_flow
-                                    node_flows[child] = node_flows.get(child, 0.0) + edge_flow
-            
-                elif isinstance(n, ProductUnit):
-                    for child in n.subcircuits:
-                        edge_flows[(n, child)] = node_flows[n]
-                        node_flows[child] = node_flows.get(child, 0.0) + node_flows[n]
-                    
-        return edge_flows
-    
-    def compute_edge_flows(self, x: np.ndarray) -> Dict[Tuple["Unit", "Unit"], float]:
-        """
-        Compute edge flows for a given sample.
-        Forward pass to get node likelihoods and backward pass to get edge flows.
-        """
-        node_likelihoods = self._forward_pass_likelihoods(x)
-        edge_flows = self._backward_pass_flows(node_likelihoods)
-        return edge_flows
-
-    def prune(self, dataset: np.ndarray, pruning_percentage: float = 0.1):
-        """
-        Prunes the circuit using EFLOW heuristic.
-
-        :param dataset: The dataset to use for calculating circuit flows.
-        :param pruning_percentage: The percentage of sum-unit edges to prune (e.g., 0.8 for 80%).
-        """
-        if not 0 < pruning_percentage < 1:
-            raise ValueError("Pruning percentage must be between 0 and 1.")
-
-        # Aggregate edge flows over the entire dataset
-        aggregate_flows = {}
-
-        print("Calculating aggregate flows for pruning...")
         for x in dataset:
-            edge_flows = self.compute_edge_flows(x)
-            
-            for edge, flow in edge_flows.items():
-                aggregate_flows[edge] = aggregate_flows.get(edge, 0.0) + flow
-        
-        prunable_edges = sorted(
-            [edge for edge in aggregate_flows.keys() if isinstance(edge[0], SumUnit)],
-            key=lambda edge: aggregate_flows[edge]
-        )
-        
-        num_to_prune = int(len(prunable_edges) * pruning_percentage)
-        edges_to_prune = prunable_edges[:num_to_prune]
-
-        # Pruning
-        print(f"Pruning {len(edges_to_prune)} of {len(prunable_edges)} sum edges...")
-        modified_sum_nodes = set()
-        for parent_node, child_node in edges_to_prune:
-            parent_node.remove_child(child_node)
-            modified_sum_nodes.add(parent_node)
-
-        # Remove disconnected nodes, sum units without children
-        nodes_to_remove = set()
-        
-        for sum_node in modified_sum_nodes:
-            if len(sum_node.subcircuits) == 0:
-                nodes_to_remove.add(sum_node)
-        
-        if len(self.nodes()) > 0:
-            try:
-                current_root = self.root
-                reachable_nodes = self.descendants(current_root)
-                reachable_nodes.add(current_root)
+            # Ensure x is 2D (reshape single sample to batch of size 1)
+            if x.ndim == 1:
+                x = x.reshape(1, -1)
                 
-                for node in list(self.nodes()):
-                    if node not in reachable_nodes:
-                        nodes_to_remove.add(node)
-                        
-            except ValueError:
-                # There are disconnected nodes
-                all_nodes = set(self.nodes())
-                visited = set()
-                largest_component = set()
-                
-                for node in all_nodes:
-                    if node not in visited:
-                        component = {node}
-                        descendants = self.descendants(node)
-                        component.update(descendants)
-                        
-                        queue = [node]
-                        while queue:
-                            current = queue.pop(0)
-                            for pred in self.predecessors(current):
-                                if pred not in component:
-                                    component.add(pred)
-                                    queue.append(pred)
-                        
-                        visited.update(component)
-                        
-                        if len(component) > len(largest_component):
-                            largest_component = component
-                
-                for node in all_nodes:
-                    if node not in largest_component:
-                        nodes_to_remove.add(node)
+            # Forward pass
+            node_log_likelihoods = {}
+            for layer in reversed(self.layers):
+                for node in layer:
+                    if isinstance(node, LeafUnit):
+                        # TODO: Test correct leaf unit likelihood computation
+                        node_log_likelihoods[node] = node.distribution.log_likelihood(x[:, [self.variable_to_index_map[var] for var in node.variables]])
+                    elif isinstance(node, ProductUnit):
+                        likelihood = 1.0
+                        for child in node.subcircuits:
+                            likelihood *= node_log_likelihoods[child]
+                        node_log_likelihoods[node] = likelihood
+                    elif isinstance(node, SumUnit):
+                        likelihood = 0.0
+                        for child in node.subcircuits:
+                            # Get weight from the edge between parent and child
+                            weight = self.graph.get_edge_data(node.index, child.index)
+                            if weight is None:
+                                weight = 0.0
+                            likelihood += np.exp(weight) * node_log_likelihoods[child]
+                        node_log_likelihoods[node] = likelihood
 
-        # Get current node indices for efficient membership testing
-        current_node_indices = {node.index for node in self.nodes() if node.index is not None}
-        
-        for node in nodes_to_remove:
-            if node.index is not None and node.index in current_node_indices:
-                self.remove_node(node)
+            # Backward pass
+            node_flows = {self.root: 1.0}
+            for layer in self.layers:
+                for node in layer:
+                    if node == self.root:
+                        continue
+                    node_flows[node] = 0.0
+                    for parent in node.parents:
+                        if isinstance(parent, SumUnit):
+                            node_flows[node] += node_flows[parent]
+                        elif isinstance(parent, ProductUnit):
+                            if node_log_likelihoods[parent] > 0:
+                                contribution = node_log_likelihoods[node] / node_log_likelihoods[parent]
+                                node_flows[node] += contribution * node_flows[parent]
 
-        # Normalize weights again of remaining sum nodes
-        # Refresh the set after removing nodes
-        current_node_indices = {node.index for node in self.nodes() if node.index is not None}
-        for sum_node in modified_sum_nodes:
-            if sum_node.index is not None and sum_node.index in current_node_indices and len(sum_node.subcircuits) > 0:
-                sum_node.normalize()
+            # Compute edge flows
+            for layer in self.layers:
+                for node in layer:
+                    if isinstance(node, SumUnit):
+                        for child in node.subcircuits:
+                            if node_log_likelihoods[node] > 0:
+                                # Get weight from the edge between parent and child
+                                weight = self.graph.get_edge_data(node.index, child.index)
+                                if weight is None:
+                                    weight = 0.0
+                                edge_flow = (np.exp(weight) * node_log_likelihoods[child] / node_log_likelihoods[node] * node_flows[node])
+                                edge_flows[(node, child)] += edge_flow
 
-        print("Pruning complete.")
+        return edge_flows
+
+    def prune(self, dataset: np.ndarray, pruning_percentage: float) -> ProbabilisticCircuit:
+        """
+        Prune the circuit based on the computed edge flows and a pruning percentage.
+
+        :param dataset: The input dataset.
+        :param pruning_percentage: The percentage of edges to prune.
+        """
+        edge_flows = self.compute_circuit_flows(dataset)
+        edge_list = []
+        for layer in self.layers:
+            for node in layer:
+                if isinstance(node, SumUnit):
+                    for child in node.subcircuits:
+                        edge_list.append((node, child, edge_flows.get((node, child), 0.0)))
+
+        edge_list.sort(key=lambda x: x[2])
+        num_edges_to_prune = int(pruning_percentage * len(edge_list))
+        edges_to_prune = edge_list[:num_edges_to_prune]
+
+        pruned_pc = copy.deepcopy(self)
+        pruned_root = pruned_pc.root
+        for parent, child, _ in edges_to_prune:
+            pruned_pc.remove_edge(parent, child)
+
+        pruned_pc.remove_unreachable_nodes(pruned_root)
+        pruned_pc.normalize()
+        return pruned_pc
 
     def _grow_sum_unit(self, original_sum_unit, new_sum_unit, unit_map, noise_variance):
         """
