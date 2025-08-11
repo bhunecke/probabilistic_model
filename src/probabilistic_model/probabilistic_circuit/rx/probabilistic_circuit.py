@@ -1528,100 +1528,60 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
         pruned_pc.normalize()
         return pruned_pc
 
-    def _grow_sum_unit(self, original_sum_unit, new_sum_unit, unit_map, noise_variance):
+    def grow(self, noise_variance: float) -> ProbabilisticCircuit:
         """
-        Helper method to apply the growing operation to a single sum unit.
+        Grow the circuit and duplicate its structure with added noise.
+
+        :param noise_variance: The variance of the noise to add.
         """
-        original_weighted_subcircuits = list(original_sum_unit.log_weighted_subcircuits)
+        grown_pc = ProbabilisticCircuit()
+        old2new = {}
+        old2old_copy = {}
 
-        # TODO: Clear children of the new unit by removing any existing edges
-        # for child in list(new_sum_unit.subcircuits):
-        #     new_sum_unit.probabilistic_circuit.remove_edge(new_sum_unit, child)
-
-        for log_weight, original_child in original_weighted_subcircuits:
-            original_weight = np.exp(log_weight)
-            new_child = unit_map[original_child]
-
-            # Create noisy versions of the weights (see paper, gaussian noise variance: epsilon ~ N(1, sigma^2))
-            epsilon1 = abs(np.random.normal(1.0, noise_variance))
-            epsilon2 = abs(np.random.normal(1.0, noise_variance))
-            epsilon3 = abs(np.random.normal(1.0, noise_variance))
-
-            # Create the three new edges described in the paper:
-            # New parent to new child (orange in Fig. 7)
-            new_sum_unit.add_child(new_child, original_weight * epsilon1)
-
-            # Old parent to new child (green in Fig. 7)
-            original_sum_unit.add_child(new_child, original_weight * epsilon2)
-
-            # New parent to old child (purple in Fig. 7)
-            new_sum_unit.add_child(original_child, original_weight * epsilon3)
-
-        original_sum_unit.normalize()
-        new_sum_unit.normalize()
-    
-    def grow(self, noise_variance: float = 0.1):
-        """
-        Grows the circuit by creating a noisy copy of its components.
-
-        :noise_variance: The variance of the Gaussian noise applied to new weights.
-        """
-        print("Starting circuit growth...")
-
-        # Store the original root before we start modifying the circuit
         original_root = self.root
+        new_root = SumUnit(probabilistic_circuit=grown_pc)
+        for node in self.nodes():
+            node_old_copy = node.copy_without_graph()
+            node_new = node.copy_without_graph()
+            grown_pc.add_node(node_old_copy)
+            grown_pc.add_node(node_new)
 
-        # Only grow if the root is a SumUnit, otherwise the structure is not suitable for growing
-        if not isinstance(original_root, SumUnit):
-            print("Warning: Root is not a SumUnit. Cannot grow circuit effectively.")
-            return
+            if node == original_root:
+                grown_pc.add_edge(new_root, node_old_copy, 0.5)
+                grown_pc.add_edge(new_root, node_new, 0.5)
 
-        # Create a deep copy of the entire circuit to serve as the "new" circuit
-        new_circuit = self.__deepcopy__()
-        
-        # Create a mapping from original units to their copied equivalents
-        unit_map = {}
-        original_nodes = list(self.nodes())
-        new_nodes = list(new_circuit.nodes())
-        
-        # Map nodes based on their position (since deepcopy preserves structure)
-        for orig_node, new_node in zip(original_nodes, new_nodes):
-            unit_map[orig_node] = new_node
+            old2new[node] = node_new
+            old2old_copy[node] = node_old_copy
 
-        # Transfer copied nodes to this circuit by removing them from the new circuit first
-        for layer in reversed(self.layers):
-            for original_unit in layer:
-                new_unit = unit_map[original_unit]
-                
-                # Remove the new unit from its current circuit
-                if new_unit.probabilistic_circuit is not None:
-                    new_unit.probabilistic_circuit.remove_node(new_unit)
-                
-                # Add it to this circuit
-                self.add_node(new_unit)
+        for parent, child, log_weight in self.edges():
+            parent_old_copy = old2old_copy[parent]
+            child_old_copy = old2old_copy[child]
+            parent_new = old2new[parent]
+            child_new = old2new[child]
 
-                if isinstance(original_unit, ProductUnit):
-                    # For product units, connect new parent to new children
-                    for original_child in original_unit.subcircuits:
-                        new_child = unit_map[original_child]
-                        new_unit.add_subcircuit(new_child)
+            if isinstance(parent, SumUnit):
+                if log_weight is None:
+                    log_weight = 0.0
+                e = 1e-9
+                epsilon_1 = np.random.normal(1.0, np.sqrt(noise_variance))
+                epsilon_2 = np.random.normal(1.0, np.sqrt(noise_variance))
+                epsilon_3 = np.random.normal(1.0, np.sqrt(noise_variance))
+                noise_1 = np.log(max(epsilon_1, e))
+                noise_2 = np.log(max(epsilon_2, e))
+                noise_3 = np.log(max(epsilon_3, e))
+                grown_pc.add_edge(parent_old_copy, child_old_copy, log_weight)
+                grown_pc.add_edge(parent_new, child_new, log_weight + noise_1)
+                grown_pc.add_edge(parent_old_copy, child_new, log_weight + noise_2)
+                grown_pc.add_edge(parent_new, child_old_copy, log_weight + noise_3)
 
-                elif isinstance(original_unit, SumUnit):
-                    self._grow_sum_unit(original_unit, new_unit, unit_map, noise_variance)
+            elif isinstance(parent, ProductUnit):
+                grown_pc.add_edge(parent_old_copy, child_old_copy)
+                grown_pc.add_edge(parent_new, child_new)
+                grown_pc.add_edge(parent_old_copy, child_new)
+                grown_pc.add_edge(parent_new, child_old_copy)
 
-        # Instead of creating a ProductUnit root, add the copied root as a new component
-        # to the original root (which is already a SumUnit)
-        new_root_copy = unit_map[original_root]
-        
-        # Add the copied circuit as a new mixture component with a small log weight
-        # This maintains the SumUnit as root while growing the circuit
-        initial_log_weight = np.log(1.0 / (len(original_root.subcircuits) + 1))
-        original_root.add_subcircuit(new_root_copy, initial_log_weight)
-        
-        # Renormalize the original root to maintain proper mixture weights
-        original_root.normalize()
-
-        print(f"Circuit growth complete. Root remains a SumUnit with {len(original_root.subcircuits)} components.")
+        grown_pc.normalize()
+        return grown_pc
 
 class ShallowProbabilisticCircuit(ProbabilisticCircuit):
     """
