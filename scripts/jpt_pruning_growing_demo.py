@@ -50,7 +50,6 @@ def main():
     figure.write_html("learned_distribution_plot.html")
 
     pruned_pc = pc.prune(dataset.values, pruning_percentage=0.5)
-    pruned_pc.simplify()
     pruned_pc.plot_structure()
     plt_pruned_name = "circuit_structure_pruned.png"
     plt.savefig(plt_pruned_name, dpi=300, bbox_inches='tight')
@@ -61,7 +60,6 @@ def main():
     print(f"- Impossible samples {impossible_percent:.2f}%.")
 
     grown_pc = pruned_pc.grow(noise_variance=0.1)
-    pruned_pc.simplify()
     grown_pc.plot_structure()
     plt_grown_name = "circuit_structure_grown.png"
     plt.savefig(plt_grown_name, dpi=300, bbox_inches='tight')
