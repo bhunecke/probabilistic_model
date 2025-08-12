@@ -20,8 +20,8 @@ def summarize_log_likelihood(ll_array: np.ndarray) -> tuple[float, float]:
 
 def main():
     np.random.seed(69)
-    dist_1 = np.random.multivariate_normal(np.zeros((2,)), np.eye(2, 2), size=(100,))
-    dist_2 = np.random.multivariate_normal(np.array([3, 4]), [[1, 2], [1, 0]], size=(200,))
+    dist_1 = np.random.multivariate_normal(np.zeros((2,)), np.eye(2, 2), size=(200,))
+    dist_2 = np.random.multivariate_normal(np.array([3, 4]), [[1, 2], [1, 0]], size=(300,))
     dataset = np.concatenate((dist_1, dist_2))
     dataset = pd.DataFrame(dataset, columns=["x", "y"])
     print("Sample dataset:")
@@ -50,22 +50,24 @@ def main():
     figure.write_html("learned_distribution_plot.html")
 
     pruned_pc = pc.prune(dataset.values, pruning_percentage=0.5)
+    pruned_pc.simplify()
     pruned_pc.plot_structure()
     plt_pruned_name = "circuit_structure_pruned.png"
     plt.savefig(plt_pruned_name, dpi=300, bbox_inches='tight')
     plt.close()
     mean_ll, impossible_percent = summarize_log_likelihood(pruned_pc.log_likelihood(dataset.values))
-    print(f"\nPruned PC has {len(list(pruned_pc.nodes()))} nodes and {len(list(pruned_pc.edges()))} edges. Total log-likelihood={np.sum(pruned_pc.log_likelihood(dataset.values))}")
+    print(f"\nPruned PC has {len(list(pruned_pc.nodes()))} nodes and {len(list(pruned_pc.edges()))} edges.")
     print(f"- Mean log-likelihood {mean_ll:.3f}.")
     print(f"- Impossible samples {impossible_percent:.2f}%.")
 
     grown_pc = pruned_pc.grow(noise_variance=0.1)
+    pruned_pc.simplify()
     grown_pc.plot_structure()
     plt_grown_name = "circuit_structure_grown.png"
     plt.savefig(plt_grown_name, dpi=300, bbox_inches='tight')
     plt.close()
     mean_ll, impossible_percent = summarize_log_likelihood(grown_pc.log_likelihood(dataset.values))
-    print(f"\nGrown PC has {len(list(grown_pc.nodes()))} nodes and {len(list(grown_pc.edges()))} edges. Total log-likelihood={np.sum(grown_pc.log_likelihood(dataset.values))}")
+    print(f"\nGrown PC has {len(list(grown_pc.nodes()))} nodes and {len(list(grown_pc.edges()))} edges.")
     print(f"- Mean log-likelihood {mean_ll:.3f}.")
     print(f"- Impossible samples {impossible_percent:.2f}%.")
 
