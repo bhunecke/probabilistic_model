@@ -347,7 +347,14 @@ class DiscreteDistribution(UnivariateDistribution):
         if id_self in memo:
             return memo[id_self]
         import copy
-        variable = self.variable.__class__(self.variable.name, self.variable.domain)
+        
+        if hasattr(self.variable, 'mean') and hasattr(self.variable, 'std'):
+            # JPT Integer variables with additional parameters 'mean' and 'std'
+            variable = self.variable.__class__(self.variable.name, self.variable.mean, self.variable.std)
+        else:
+            # Standard random_events variable
+            variable = self.variable.__class__(self.variable.name, self.variable.domain)
+            
         probabilities = copy.deepcopy(self.probabilities, memo)
         result = self.__class__(variable, probabilities)
         memo[id_self] = result

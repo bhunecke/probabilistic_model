@@ -2,8 +2,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import plotly.graph_objects as go
-from probabilistic_model.learning.jpt.variables import *
-from probabilistic_model.learning.jpt.jpt import *
+from probabilistic_model.learning.jpt.variables import infer_variables_from_dataframe
+from probabilistic_model.learning.jpt.jpt import JPT
 
 def summarize_log_likelihood(ll_array: np.ndarray) -> tuple[float, float]:
     ll_array = np.asarray(ll_array)
