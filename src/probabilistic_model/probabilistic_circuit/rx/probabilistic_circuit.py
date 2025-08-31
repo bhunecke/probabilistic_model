@@ -623,28 +623,6 @@ class SumUnit(InnerUnit):
             likelihood = subcircuit.log_likelihood(samples)
             result[likelihood > -np.inf] = index
         return result
-    
-    def add_child(self, child: "Unit", weight: float):
-        """
-        Adds a child and its corresponding weight to this sum unit.
-        
-        :param child: The child unit to add.
-        :param weight: The weight of the child (will be converted to log space).
-        """
-        log_weight = np.log(weight) if weight > 0 else -np.inf
-        self.add_subcircuit(child, log_weight)
-
-    def remove_child(self, child_to_remove: Unit):
-        """
-        Removes a child from this sum unit.
-
-        :param child_to_remove: The child unit to remove.
-        """
-        # Use object identity instead of equality to avoid numpy array comparison issues
-        for child in self.subcircuits:
-            if child is child_to_remove:
-                self.probabilistic_circuit.remove_edge(self, child_to_remove)
-                break
 
 
 class ProductUnit(InnerUnit):
