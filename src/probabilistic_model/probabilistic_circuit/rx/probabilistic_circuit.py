@@ -1551,7 +1551,11 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
 
         # Create new edges with noise for the duplicated structure
         for parent, child, log_weight in self.edges():
-            if parent in old2new.values() or child in old2new.values() or parent not in old2new or child not in old2new:
+            parent_in_new_values = any(parent is value for value in old2new.values())
+            child_in_new_values = any(child is value for value in old2new.values())
+            parent_not_in_keys = not any(parent is key for key in old2new.keys())
+            child_not_in_keys = not any(child is key for key in old2new.keys())
+            if parent_in_new_values or child_in_new_values or parent_not_in_keys or child_not_in_keys:
                 continue
                 
             parent_new = old2new[parent]
