@@ -31,6 +31,8 @@ from ...error import IntractableError
 from ...interfaces.drawio.drawio import DrawIOInterface, circled_product, circled_sum
 from ...probabilistic_model import ProbabilisticModel, OrderType, CenterType, MomentType
 from ...utils import MissingDict
+from .flow_analyzer import CircuitFlowAnalyzer
+
 
 class PlotAlignment(IntEnum):
     HORIZONTAL = 0
@@ -1413,73 +1415,6 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
     def __repr__(self):
         return f"{self.__class__.__name__} with {len(self.nodes())} nodes and {len(self.edges())} edges"
 
-    def compute_circuit_flows(self, dataset: np.ndarray) -> Dict[Tuple[Unit, Unit], float]:
-        """
-        Compute the flow of information through the circuit for a given dataset.
-
-        :param dataset: The input dataset.
-        """
-        edge_flows = defaultdict(float)
-        variable_map = self.variable_to_index_map
-
-        for x in tqdm.tqdm(dataset, desc="Computing circuit flows"):
-            # Ensure x is 2D (reshape single sample to batch of size 1)
-            if x.ndim == 1:
-                x = x.reshape(1, -1)
-                
-            # Forward pass
-            node_likelihoods = {}
-            for layer in reversed(self.layers):
-                for node in layer:
-                    if isinstance(node, LeafUnit):
-                        variable_indices = [variable_map[var] for var in node.variables]
-                        log_likelihood = node.distribution.log_likelihood(x[:, variable_indices])
-                        node_likelihoods[node] = np.exp(log_likelihood[0])
-                    elif isinstance(node, ProductUnit):
-                        likelihood = 1.0
-                        for child in node.subcircuits:
-                            likelihood *= node_likelihoods[child]
-                        node_likelihoods[node] = likelihood
-                    elif isinstance(node, SumUnit):
-                        likelihood = 0.0
-                        for child in node.subcircuits:
-                            # Get weight from the edge between parent and child
-                            weight = self.graph.get_edge_data(node.index, child.index)
-                            if weight is None:
-                                weight = 0.0
-                            likelihood += np.exp(weight) * node_likelihoods[child]
-                        node_likelihoods[node] = likelihood
-
-            # Backward pass
-            node_flows = {self.root: 1.0}
-            for layer in self.layers:
-                for node in layer:
-                    if node.index == self.root.index:
-                        continue
-                    node_flows[node] = 0.0
-                    for parent in node.parents:
-                        if isinstance(parent, SumUnit):
-                            node_flows[node] += node_flows[parent]
-                        elif isinstance(parent, ProductUnit):
-                            if node_likelihoods[parent] > 0:
-                                contribution = node_likelihoods[node] / node_likelihoods[parent]
-                                node_flows[node] += contribution * node_flows[parent]
-
-            # Compute edge flows
-            for layer in self.layers:
-                for node in layer:
-                    if isinstance(node, SumUnit):
-                        for child in node.subcircuits:
-                            if node_likelihoods[node] > 0:
-                                # Get weight from the edge between parent and child
-                                weight = self.graph.get_edge_data(node.index, child.index)
-                                if weight is None:
-                                    weight = 0.0
-                                edge_flow = (np.exp(weight) * node_likelihoods[child] / node_likelihoods[node] * node_flows[node])
-                                edge_flows[(node, child)] += edge_flow
-
-        return edge_flows
-
     def prune(self, dataset: np.ndarray, pruning_percentage: float) -> Self:
         """
         Prune the circuit based on the computed edge flows and a pruning percentage.
@@ -1487,7 +1422,8 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
         :param dataset: The input dataset.
         :param pruning_percentage: The percentage of edges to prune.
         """
-        edge_flows = self.compute_circuit_flows(dataset)
+        analyzer = CircuitFlowAnalyzer(self)
+        edge_flows = analyzer.compute_flows(dataset)
         edge_list = []
         for layer in self.layers:
             for node in layer:
