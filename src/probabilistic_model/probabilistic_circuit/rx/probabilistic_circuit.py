@@ -31,7 +31,6 @@ from ...error import IntractableError
 from ...interfaces.drawio.drawio import DrawIOInterface, circled_product, circled_sum
 from ...probabilistic_model import ProbabilisticModel, OrderType, CenterType, MomentType
 from ...utils import MissingDict
-from .flow_analyzer import CircuitFlowAnalyzer
 
 
 class PlotAlignment(IntEnum):
@@ -1414,34 +1413,6 @@ class ProbabilisticCircuit(ProbabilisticModel, SubclassJSONSerializer):
 
     def __repr__(self):
         return f"{self.__class__.__name__} with {len(self.nodes())} nodes and {len(self.edges())} edges"
-
-    def prune(self, dataset: np.ndarray, pruning_percentage: float) -> Self:
-        """
-        Prune the circuit based on the computed edge flows and a pruning percentage.
-
-        :param dataset: The input dataset.
-        :param pruning_percentage: The percentage of edges to prune.
-        """
-        analyzer = CircuitFlowAnalyzer(self)
-        edge_flows = analyzer.compute_flows(dataset)
-        edge_list = []
-        for layer in self.layers:
-            for node in layer:
-                if isinstance(node, SumUnit):
-                    for child in node.subcircuits:
-                        edge_list.append((node, child, edge_flows.get((node, child), 0.0)))
-
-        edge_list.sort(key=lambda x: x[2])
-        num_edges_to_prune = int(pruning_percentage * len(edge_list))
-        edges_to_prune = edge_list[:num_edges_to_prune]
-
-        pruned_root = self.root
-        for parent, child, _ in edges_to_prune:
-            self.remove_edge(parent, child)
-
-        self.remove_unreachable_nodes(pruned_root)
-        self.normalize()
-        return self
 
     def grow(self, noise_variance: float) -> Self:
         """

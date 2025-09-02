@@ -35,6 +35,7 @@ import plotly.graph_objects as go
 from probabilistic_model.learning.jpt.variables import infer_variables_from_dataframe
 from probabilistic_model.learning.jpt.jpt import JPT
 from probabilistic_model.probabilistic_circuit.rx.probabilistic_circuit import *
+from probabilistic_model.probabilistic_circuit.rx.flow_analyzer import CircuitFlowAnalyzer
 from probabilistic_model.distributions import *
 from random_events.product_algebra import Continuous
 
@@ -166,7 +167,8 @@ Now let's prune the circuit to remove less important edges.
 pruning_percentage = 0.4
 print(f"\nPruning {pruning_percentage*100}% of the edges...")
 
-pruned_circuit = original_circuit.prune(dataset=test_dataset, pruning_percentage=pruning_percentage)
+flow_analyzer = CircuitFlowAnalyzer(original_circuit)
+pruned_circuit = flow_analyzer.prune(dataset=test_dataset, pruning_percentage=pruning_percentage)
 
 # Plot the pruned circuit
 pruned_circuit.plot_structure()
@@ -274,7 +276,8 @@ pruning_percentage = 0.5
 print(f"\nPruning {pruning_percentage*100}% of the JPT edges...")
 
 jpt_circuit_copy = copy.deepcopy(jpt_circuit)
-pruned_jpt = jpt_circuit_copy.prune(dataset.values, pruning_percentage=pruning_percentage)
+flow_analyzer = CircuitFlowAnalyzer(jpt_circuit_copy)
+pruned_jpt = flow_analyzer.prune(dataset.values, pruning_percentage=pruning_percentage)
 
 # Plot the pruned structure
 pruned_jpt.plot_structure()
